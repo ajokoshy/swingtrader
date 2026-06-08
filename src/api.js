@@ -1,25 +1,23 @@
 /**
  * api.js
- * All external API calls live here.
- * Yahoo Finance calls go through the Netlify Function proxy (fixes CORS in production).
- * Claude AI calls go directly (no CORS issue — Anthropic allows browser calls).
+ * All external API calls.
+ * Both Yahoo Finance AND Claude AI go through Netlify Function proxies.
+ * This fully eliminates all CORS errors in production.
  */
 
-const IS_DEV = import.meta.env.DEV
-const PROXY_BASE = '/.netlify/functions/yahoo-proxy'
+const YAHOO_PROXY  = '/.netlify/functions/yahoo-proxy'
+const CLAUDE_PROXY = '/.netlify/functions/claude-proxy'
 
-/**
- * Fetch OHLCV data for a given NSE symbol.
- * In production → Netlify Function proxy (no CORS).
- * In dev with netlify dev → same proxy via port 8888.
- */
+// ─────────────────────────────────────────────────────────
+// Yahoo Finance — server-side proxy (CORS fix)
+// ─────────────────────────────────────────────────────────
 export async function fetchOHLCV(symbol, range = '1y', interval = '1d') {
   const sym = symbol.toUpperCase().endsWith('.NS')
     ? symbol.toUpperCase()
     : `${symbol.toUpperCase()}.NS`
 
   const params = new URLSearchParams({ symbol: sym, range, interval })
-  const url = `${PROXY_BASE}?${params}`
+  const url = `${YAHOO_PROXY}?${params}`
 
   let response
   try {
@@ -46,15 +44,15 @@ export async function fetchOHLCV(symbol, range = '1y', interval = '1d') {
   const result = json?.chart?.result?.[0]
   if (!result) {
     const errMsg = json?.chart?.error?.description || 'No data found.'
-    throw new Error(`${sym}: ${errMsg} Verify the NSE symbol is correct.`)
+    throw new Error(`${sym}: ${errMsg} — Verify the NSE symbol is correct.`)
   }
 
   const { timestamp, indicators: { quote: [q] } } = result
   if (!timestamp || !q) throw new Error('Incomplete data received. Try again.')
 
   const data = timestamp.map((t, i) => ({
-    ts: t,
-    date: new Date(t * 1000).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
+    ts:     t,
+    date:   new Date(t * 1000).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }),
     open:   q.open?.[i]   ?? null,
     high:   q.high?.[i]   ?? null,
     low:    q.low?.[i]    ?? null,
@@ -66,11 +64,10 @@ export async function fetchOHLCV(symbol, range = '1y', interval = '1d') {
   return data
 }
 
-/**
- * Get AI analysis summary from Claude.
- * Called directly from browser — Anthropic API allows CORS.
- * API key is injected by the claude.ai artifact environment.
- */
+// ─────────────────────────────────────────────────────────
+// Claude AI — server-side proxy (CORS fix)
+// Requires ANTHROPIC_API_KEY in Netlify environment variables
+// ─────────────────────────────────────────────────────────
 export async function getAISummary(symbol, analysis) {
   const prompt = `You are a precise NSE swing trading analyst for Indian equities. In exactly 4 sentences, analyse this technical data for ${symbol}:
 
@@ -90,7 +87,7 @@ Plain text only. No markdown. No disclaimers. No bullet points.`
 
   let response
   try {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
+    response = await fetch(CLAUDE_PROXY, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -98,18 +95,32 @@ Plain text only. No markdown. No disclaimers. No bullet points.`
         max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }]
       }),
-      signal: AbortSignal.timeout(20000)
+      signal: AbortSignal.timeout(25000)
     })
   } catch (err) {
-    throw new Error(`AI summary request failed: ${err.message}`)
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+      throw new Error('AI request timed out. Try again.')
+    }
+    throw new Error(`AI request failed: ${err.message}`)
   }
 
   if (!response.ok) {
-    throw new Error(`AI service error (${response.status})`)
+    let errMsg = `AI service error (${response.status})`
+    try {
+      const errBody = await response.json()
+      if (errBody.error) errMsg = errBody.error
+    } catch { /* ignore */ }
+    throw new Error(errMsg)
   }
 
-  const data = await response.json()
+  let data
+  try {
+    data = await response.json()
+  } catch {
+    throw new Error('Invalid response from AI service.')
+  }
+
   const text = data.content?.[0]?.text
-  if (!text) throw new Error('Empty AI response')
+  if (!text) throw new Error('Empty response from AI. Try again.')
   return text
 }
