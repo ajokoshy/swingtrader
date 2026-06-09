@@ -9,8 +9,8 @@ import { StatPill, TFBadge, ChartTooltip, Spinner, ErrorBanner, NoTradeCard } fr
 
 const QUICK_STOCKS = [
   'RELIANCE','TCS','INFY','HDFCBANK','ICICIBANK',
-  'WIPRO','SBIN','TATAMOTORS','BAJFINANCE','HINDUNILVR',
-  'ADANIENT','AXISBANK',
+  'WIPRO','SBIN','BAJFINANCE','HINDUNILVR',
+  'ADANIENT','AXISBANK','KOTAKBANK',
 ]
 
 const CHART_TABS = [
@@ -69,7 +69,14 @@ export default function App() {
         setAiLoading(true)
         getAISummary(s, analysis)
           .then(text => { setAiText(text); setAiLoading(false) })
-          .catch(err  => { setAiError(err.message); setAiLoading(false) })
+          .catch(err => {
+            let msg = 'AI summary unavailable. Please try again.'
+            if (err instanceof Error) msg = err.message
+            else if (typeof err === 'string') msg = err
+            else if (err && typeof err === 'object') msg = err.message || err.error?.message || JSON.stringify(err)
+            setAiError(msg)
+            setAiLoading(false)
+          })
       }
 
     } catch (err) {
@@ -423,8 +430,11 @@ export default function App() {
                 </div>
               )}
               {aiError && (
-                <div style={{ color: '#ff6e6e', fontSize: 12 }}>
-                  AI summary unavailable: {aiError}
+                <div style={{ color: '#ff6e6e', fontSize: 12, lineHeight: 1.6 }}>
+                  <div style={{ marginBottom: 4 }}>⚠️ {aiError}</div>
+                  <div style={{ color: '#555', fontSize: 11 }}>
+                    Check: ANTHROPIC_API_KEY is set in Netlify → Site Settings → Environment Variables
+                  </div>
                 </div>
               )}
               {aiText && (
@@ -433,6 +443,168 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* Rule-Based Plain English Explanation */}
+            {(() => {
+              const r = result
+              const ind = r.indicators
+              const isBull = r.score > 0
+              const signalColor = r.color
+
+              // ── What the signal means ──
+              const signalMeaning = {
+                'STRONG BUY':  { emoji: '🚀', short: 'Strong Buy', explain: 'Multiple indicators are strongly aligned for an upward move. This is the highest confidence bullish setup.' },
+                'BUY':         { emoji: '✅', short: 'Buy',         explain: 'Most indicators point upward. A good setup for a swing trade entry with proper stop loss.' },
+                'HOLD / WAIT': { emoji: '⏸',  short: 'Hold/Wait',  explain: 'Signals are mixed — some bullish, some bearish. Best to wait for a clearer setup before entering.' },
+                'SELL':        { emoji: '⚠️', short: 'Sell',        explain: 'Most indicators point downward. Avoid buying. If you hold this stock, consider reducing your position.' },
+                'STRONG SELL': { emoji: '🔴', short: 'Strong Sell', explain: 'Strong bearish alignment across indicators. High risk of further downside. Avoid entry.' },
+              }[r.signal] || { emoji: '❓', short: r.signal, explain: '' }
+
+              // ── Why this signal ──
+              const reasons = []
+              const tfs = [r.timeframes.weekly, r.timeframes.daily, r.timeframes.h4]
+              const tfBull = tfs.filter(t => t === 'bullish').length
+              const tfBear = tfs.filter(t => t === 'bearish').length
+              if (tfBull === 3) reasons.push({ icon: '🔀', text: 'All 3 timeframes (Weekly, Daily, 4-Hour) are in an uptrend — this is the strongest alignment possible.', good: true })
+              else if (tfBull === 2) reasons.push({ icon: '🔀', text: '2 out of 3 timeframes are bullish. The trend is mostly up but not fully confirmed.', good: true })
+              else if (tfBear === 3) reasons.push({ icon: '🔀', text: 'All 3 timeframes are bearish — the stock is in a clear downtrend across all time horizons.', good: false })
+              else reasons.push({ icon: '🔀', text: 'Timeframes are giving mixed signals. This reduces confidence in the trade.', good: null })
+
+              const rsiNum = parseFloat(ind.rsi)
+              if (rsiNum < 35) reasons.push({ icon: '📉', text: `RSI is ${ind.rsi} — the stock is oversold. This means it has fallen too far too fast and a bounce is likely. Good time to look for a buy entry.`, good: true })
+              else if (rsiNum > 65) reasons.push({ icon: '📈', text: `RSI is ${ind.rsi} — the stock is overbought. It has risen a lot recently and may pull back. Not ideal for a fresh buy entry.`, good: false })
+              else if (rsiNum >= 50) reasons.push({ icon: '📊', text: `RSI is ${ind.rsi} — in the bullish momentum zone (above 50). The stock has buying pressure behind it.`, good: true })
+              else reasons.push({ icon: '📊', text: `RSI is ${ind.rsi} — below 50, indicating mild bearish momentum. No strong buying pressure yet.`, good: false })
+
+              const adxNum = parseFloat(ind.adx)
+              if (adxNum >= 25) reasons.push({ icon: '💪', text: `ADX is ${ind.adx} — a strong trend is in place. This means the move is likely to continue and is not just noise.`, good: isBull })
+              else reasons.push({ icon: '😴', text: `ADX is ${ind.adx} — the trend is weak. The stock may be going sideways. Be cautious.`, good: false })
+
+              if (ind.stBull) reasons.push({ icon: '⚡', text: `Supertrend is BULLISH — price is above the dynamic support line ₹${ind.stLevel}. This is a key confirmation that the trend is up.`, good: true })
+              else reasons.push({ icon: '⚡', text: `Supertrend is BEARISH — price is below the resistance line ₹${ind.stLevel}. The trend direction is currently down.`, good: false })
+
+              const macdNum = parseFloat(ind.macd)
+              if (macdNum > 0) reasons.push({ icon: '📶', text: `MACD is positive (${ind.macd}) — buying momentum is stronger than selling momentum right now.`, good: true })
+              else reasons.push({ icon: '📶', text: `MACD is negative (${ind.macd}) — selling momentum is currently dominant. Watch for a crossover before entering.`, good: false })
+
+              if (ind.obvTrend === 'Rising') reasons.push({ icon: '🏦', text: 'OBV (On Balance Volume) is rising — big institutions and smart money are quietly accumulating this stock. This is a positive sign.', good: true })
+              else reasons.push({ icon: '🏦', text: 'OBV is falling — institutional money may be quietly selling this stock. This is a warning sign.', good: false })
+
+              // ── Trade plan in plain English ──
+              const riskAmt = Math.abs(r.price - r.stopLoss).toFixed(2)
+              const rewardAmt = Math.abs(r.target1 - r.price).toFixed(2)
+              const pctSL = Math.abs(((r.stopLoss - r.price) / r.price) * 100).toFixed(1)
+              const pctT1 = Math.abs(((r.target1 - r.price) / r.price) * 100).toFixed(1)
+              const pctT2 = Math.abs(((r.target2 - r.price) / r.price) * 100).toFixed(1)
+
+              // ── Newbie tips based on signal ──
+              const tips = []
+              if (isBull) {
+                tips.push({ icon: '🎯', title: 'When to Enter', text: `Buy near the current price of ₹${r.price}. Ideally enter when the price is stable or slightly dipping — do not chase if it jumps up suddenly.` })
+                tips.push({ icon: '🛑', title: 'Stop Loss (Must Set)', text: `Place your stop loss at ₹${r.stopLoss} — that is ${pctSL}% below current price. If the stock falls to this level, exit immediately. This protects you from big losses.` })
+                tips.push({ icon: '🎁', title: 'Profit Targets', text: `Target 1 is ₹${r.target1} (+${pctT1}%). Book at least 50% of your position here. Target 2 is ₹${r.target2} (+${pctT2}%) for the remaining position. Do not be greedy — partial booking locks in profit.` })
+              } else {
+                tips.push({ icon: '🚫', title: 'Do Not Buy', text: `The signal is ${r.signal}. This is not the right time to enter a long position. Wait for the signal to turn BUY before investing.` })
+                tips.push({ icon: '⏳', title: 'When to Watch Again', text: `Re-check this stock when RSI drops below 35 (oversold) or when Supertrend flips to Bullish. That would signal a potential reversal.` })
+              }
+              tips.push({ icon: '💰', title: 'How Much to Invest', text: `As a beginner, never risk more than 2% of your total capital on one trade. Example: if you have ₹1,00,000, risk only ₹2,000. Calculate your position size as: Risk Amount ÷ (Entry Price − Stop Loss) = Number of shares.` })
+              tips.push({ icon: '⏱️', title: 'Swing Trade Timeframe', text: `This is a swing trade signal — expected to play out in 3 to 15 trading days. Check the stock once daily after market close. Do not watch it minute by minute.` })
+              tips.push({ icon: '📰', title: 'Check for News', text: `Before entering, do a quick Google search for "${r.symbol} news today". If there is any negative news (bad earnings, promoter selling, regulatory issue), skip this trade regardless of the signal.` })
+
+              return (
+                <div style={{ background: 'rgba(16,185,129,0.04)', border: '1px solid rgba(16,185,129,0.18)', borderRadius: 14, padding: 18 }}>
+                  {/* Header */}
+                  <div style={{ fontSize: 9, color: '#10b981', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 14, fontWeight: 700 }}>
+                    📖 Plain English Explanation — For Beginners
+                  </div>
+
+                  {/* What does this signal mean */}
+                  <div style={{ background: `${signalColor}10`, border: `1px solid ${signalColor}30`, borderRadius: 10, padding: '12px 16px', marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, color: '#666', marginBottom: 6, fontFamily: "'Outfit',sans-serif" }}>WHAT THIS SIGNAL MEANS</div>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                      <span style={{ fontSize: 24 }}>{signalMeaning.emoji}</span>
+                      <div>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: signalColor, fontFamily: "'Outfit',sans-serif", marginBottom: 4 }}>
+                          {signalMeaning.short} — {r.bullCount} out of {r.totalSigs} indicators are bullish
+                        </div>
+                        <div style={{ fontSize: 12, color: '#aaa', lineHeight: 1.7, fontFamily: "'Outfit',sans-serif" }}>
+                          {signalMeaning.explain}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Why this signal */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, color: '#666', marginBottom: 10, fontFamily: "'Outfit',sans-serif" }}>WHY THE APP GAVE THIS SIGNAL</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {reasons.map((reason, i) => {
+                        const bc = reason.good === true ? '#00e676' : reason.good === false ? '#ff6e6e' : '#ffd740'
+                        return (
+                          <div key={i} style={{ display: 'flex', gap: 10, padding: '9px 12px', background: 'rgba(255,255,255,0.02)', borderRadius: 8, borderLeft: `3px solid ${bc}` }}>
+                            <span style={{ fontSize: 16, flexShrink: 0 }}>{reason.icon}</span>
+                            <div style={{ fontSize: 12, color: '#bbb', lineHeight: 1.65, fontFamily: "'Outfit',sans-serif" }}>{reason.text}</div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Trade plan */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, color: '#666', marginBottom: 10, fontFamily: "'Outfit',sans-serif" }}>YOUR TRADE PLAN IN SIMPLE NUMBERS</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
+                      {[
+                        { label: 'Buy At',          value: `₹${r.price}`,       sub: 'Entry price',          color: '#fff' },
+                        { label: 'Exit If Wrong',   value: `₹${r.stopLoss}`,    sub: `−${pctSL}% from entry`, color: '#ff6e6e' },
+                        { label: 'Book Profit 1',   value: `₹${r.target1}`,     sub: `+${pctT1}% gain`,       color: '#00e676' },
+                        { label: 'Book Profit 2',   value: `₹${r.target2}`,     sub: `+${pctT2}% gain`,       color: '#06b6d4' },
+                        { label: 'Risk vs Reward',  value: `1 : ${r.rrRatio}`,  sub: `Risk ₹${riskAmt} → Earn ₹${rewardAmt}`, color: '#ffd740' },
+                      ].map((item, i) => (
+                        <div key={i} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '10px 14px' }}>
+                          <div style={{ fontSize: 9, color: '#555', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>{item.label}</div>
+                          <div style={{ fontSize: 16, fontWeight: 800, color: item.color, fontFamily: "'JetBrains Mono','Courier New',monospace", marginBottom: 3 }}>{item.value}</div>
+                          <div style={{ fontSize: 10, color: '#555' }}>{item.sub}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Newbie tips */}
+                  <div>
+                    <div style={{ fontSize: 11, color: '#666', marginBottom: 10, fontFamily: "'Outfit',sans-serif" }}>STEP-BY-STEP GUIDE FOR YOU</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {tips.map((tip, i) => (
+                        <div key={i} style={{ display: 'flex', gap: 12, padding: '12px 14px', background: 'rgba(16,185,129,0.04)', border: '1px solid rgba(16,185,129,0.1)', borderRadius: 10 }}>
+                          <span style={{ fontSize: 20, flexShrink: 0, marginTop: 1 }}>{tip.icon}</span>
+                          <div>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: '#10b981', fontFamily: "'Outfit',sans-serif", marginBottom: 4 }}>{tip.title}</div>
+                            <div style={{ fontSize: 12, color: '#999', lineHeight: 1.7, fontFamily: "'Outfit',sans-serif" }}>{tip.text}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Score bar */}
+                  <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(255,255,255,0.02)', borderRadius: 10, border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <span style={{ fontSize: 10, color: '#555', fontFamily: "'Outfit',sans-serif" }}>Overall Signal Strength</span>
+                      <span style={{ fontSize: 10, color: signalColor, fontWeight: 700, fontFamily: "'Outfit',sans-serif" }}>{r.confidence}% confident</span>
+                    </div>
+                    <div style={{ height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+                      <div style={{ width: `${r.confidence}%`, height: '100%', background: `linear-gradient(90deg, ${signalColor}60, ${signalColor})`, borderRadius: 3, transition: 'width 1s ease' }} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: '#444', fontFamily: "'Outfit',sans-serif" }}>
+                      <span>🔴 {r.bearCount} bearish signals</span>
+                      <span>Score: {r.score > 0 ? '+' : ''}{r.score}</span>
+                      <span>🟢 {r.bullCount} bullish signals</span>
+                    </div>
+                  </div>
+
+                </div>
+              )
+            })()}
 
             {/* Candlestick Patterns */}
             {result.patterns.length > 0 && (
@@ -528,7 +700,7 @@ export default function App() {
         {!result && !loading && !error && (
           <div style={{ textAlign: 'center', padding: '70px 20px' }}>
             <div style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 18, letterSpacing: 4, color: '#333', marginBottom: 32 }}>
-              PHASE 2 + 3 UPGRADES ACTIVE
+              INCLUDED FEATURES
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 12, maxWidth: 720, margin: '0 auto 40px', textAlign: 'left' }}>
               {[
