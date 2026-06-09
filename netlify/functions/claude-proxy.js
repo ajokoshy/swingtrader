@@ -1,64 +1,68 @@
 /**
  * Netlify Function: claude-proxy
  * Server-side proxy for Anthropic Claude API.
- * Fixes "Failed to fetch" CORS error in production.
+ * Fixes "Failed to fetch" / CORS errors in production.
  *
- * Place this file at: netlify/functions/claude-proxy.js
+ * Place at: netlify/functions/claude-proxy.js
  *
- * IMPORTANT — Set your API key in Netlify Dashboard:
- *   Site Settings → Environment Variables → Add variable
+ * Set in Netlify Dashboard → Site Settings → Environment Variables:
  *   Key:   ANTHROPIC_API_KEY
- *   Value: your-api-key-here
- *
- * Get your API key from: https://console.anthropic.com/
+ *   Value: sk-ant-...  (from console.anthropic.com)
  */
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+}
+
 export default async (req) => {
-  // Only allow POST
-  if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
-  }
-
-  // Handle CORS preflight
+  // ── Handle CORS preflight FIRST (before any other check) ──
   if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      }
-    })
+    return new Response(null, { status: 204, headers: CORS_HEADERS })
   }
 
-  // Get API key from environment variable (set in Netlify dashboard)
+  // ── Only allow POST ──
+  if (req.method !== 'POST') {
+    return new Response(
+      JSON.stringify({ error: 'Method not allowed. Use POST.' }),
+      { status: 405, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+    )
+  }
+
+  // ── Check API key is configured ──
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
-    return new Response(JSON.stringify({
-      error: 'ANTHROPIC_API_KEY not set. Add it in Netlify Dashboard → Site Settings → Environment Variables.'
-    }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+    return new Response(
+      JSON.stringify({
+        error: 'ANTHROPIC_API_KEY is not set. Go to Netlify Dashboard → Site Settings → Environment Variables and add it.'
+      }),
+      { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+    )
   }
 
-  // Parse request body
+  // ── Parse request body ──
   let body
   try {
     body = await req.json()
   } catch {
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON in request body.' }),
+      { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+    )
   }
 
-  // Forward to Anthropic API
+  if (!body.messages || !Array.isArray(body.messages)) {
+    return new Response(
+      JSON.stringify({ error: 'Missing or invalid messages array.' }),
+      { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+    )
+  }
+
+  // ── Forward to Anthropic ──
+  let anthropicRes
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -66,30 +70,34 @@ export default async (req) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: body.model || 'claude-sonnet-4-20250514',
+        model:      body.model      || 'claude-sonnet-4-20250514',
         max_tokens: body.max_tokens || 1000,
-        messages: body.messages,
-      })
+        messages:   body.messages,
+      }),
     })
-
-    const data = await response.json()
-
-    return new Response(JSON.stringify(data), {
-      status: response.status,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      }
-    })
-  } catch (err) {
-    return new Response(JSON.stringify({
-      error: 'Failed to reach Anthropic API',
-      details: err.message
-    }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    })
+  } catch (fetchErr) {
+    return new Response(
+      JSON.stringify({ error: `Could not reach Anthropic API: ${fetchErr.message}` }),
+      { status: 502, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+    )
   }
+
+  // ── Parse Anthropic response ──
+  let data
+  try {
+    data = await anthropicRes.json()
+  } catch {
+    return new Response(
+      JSON.stringify({ error: `Anthropic returned non-JSON response (status ${anthropicRes.status})` }),
+      { status: 502, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+    )
+  }
+
+  // ── Return response (including error responses from Anthropic) ──
+  return new Response(JSON.stringify(data), {
+    status: anthropicRes.status,
+    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+  })
 }
 
 export const config = { path: '/.netlify/functions/claude-proxy' }
