@@ -1,44 +1,65 @@
 /**
  * api.js
- * All external API calls.
- * Both Yahoo Finance AND Claude AI go through Netlify Function proxies.
- * This fully eliminates all CORS errors in production.
+ * All external API calls routed through Netlify Function proxies.
+ * No direct browser-to-API calls = no CORS errors in production.
  */
 
 const YAHOO_PROXY  = '/.netlify/functions/yahoo-proxy'
 const CLAUDE_PROXY = '/.netlify/functions/claude-proxy'
 
 // ─────────────────────────────────────────────────────────
-// Yahoo Finance — server-side proxy (CORS fix)
+// Helper: safely extract a readable error string from anything
+// ─────────────────────────────────────────────────────────
+function extractError(err) {
+  if (!err) return 'Unknown error'
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object') {
+    // Anthropic API error shape: { error: { message: '...' } }
+    if (err.error?.message) return err.error.message
+    if (err.error && typeof err.error === 'string') return err.error
+    if (err.message) return err.message
+    // Last resort: serialize so it's readable
+    try { return JSON.stringify(err) } catch { return 'Unknown error' }
+  }
+  return String(err)
+}
+
+// ─────────────────────────────────────────────────────────
+// Yahoo Finance — proxied server-side (CORS fix)
 // ─────────────────────────────────────────────────────────
 export async function fetchOHLCV(symbol, range = '1y', interval = '1d') {
   const sym = symbol.toUpperCase().endsWith('.NS')
     ? symbol.toUpperCase()
     : `${symbol.toUpperCase()}.NS`
 
-  const params = new URLSearchParams({ symbol: sym, range, interval })
-  const url = `${YAHOO_PROXY}?${params}`
+  const url = `${YAHOO_PROXY}?${new URLSearchParams({ symbol: sym, range, interval })}`
 
   let response
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(15000) })
   } catch (err) {
-    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
-      throw new Error('Request timed out. Check your internet connection.')
+    const name = err?.name || ''
+    if (name === 'AbortError' || name === 'TimeoutError') {
+      throw new Error('Request timed out. Check your internet connection and try again.')
     }
-    throw new Error(`Network error: ${err.message}`)
+    throw new Error(`Network error: ${extractError(err)}`)
   }
 
   if (!response.ok) {
-    const body = await response.text().catch(() => '')
-    throw new Error(`Data fetch failed (${response.status}). ${body || 'Check symbol name.'}`)
+    let msg = `Data fetch failed (HTTP ${response.status}).`
+    try {
+      const body = await response.json()
+      if (body?.error) msg = extractError(body.error)
+    } catch { /* ignore parse error */ }
+    throw new Error(msg)
   }
 
   let json
   try {
     json = await response.json()
   } catch {
-    throw new Error('Invalid response from data source. Try again.')
+    throw new Error('Invalid response from data source. Please try again.')
   }
 
   const result = json?.chart?.result?.[0]
@@ -48,7 +69,7 @@ export async function fetchOHLCV(symbol, range = '1y', interval = '1d') {
   }
 
   const { timestamp, indicators: { quote: [q] } } = result
-  if (!timestamp || !q) throw new Error('Incomplete data received. Try again.')
+  if (!timestamp || !q) throw new Error('Incomplete data received. Please try again.')
 
   const data = timestamp.map((t, i) => ({
     ts:     t,
@@ -60,12 +81,12 @@ export async function fetchOHLCV(symbol, range = '1y', interval = '1d') {
     volume: q.volume?.[i] ?? 0,
   })).filter(d => d.close != null && d.high != null && d.low != null && d.open != null)
 
-  if (data.length === 0) throw new Error(`No valid price data for ${sym}.`)
+  if (data.length === 0) throw new Error(`No valid price data returned for ${sym}.`)
   return data
 }
 
 // ─────────────────────────────────────────────────────────
-// Claude AI — server-side proxy (CORS fix)
+// Claude AI — proxied server-side (CORS fix)
 // Requires ANTHROPIC_API_KEY in Netlify environment variables
 // ─────────────────────────────────────────────────────────
 export async function getAISummary(symbol, analysis) {
@@ -85,6 +106,7 @@ Sentence 3: State exact entry, stop loss and target levels.
 Sentence 4: Name the single biggest risk to this trade setup.
 Plain text only. No markdown. No disclaimers. No bullet points.`
 
+  // ── Call proxy ──
   let response
   try {
     response = await fetch(CLAUDE_PROXY, {
@@ -93,34 +115,38 @@ Plain text only. No markdown. No disclaimers. No bullet points.`
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
-        messages: [{ role: 'user', content: prompt }]
+        messages: [{ role: 'user', content: prompt }],
       }),
-      signal: AbortSignal.timeout(25000)
+      signal: AbortSignal.timeout(25000),
     })
   } catch (err) {
-    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
-      throw new Error('AI request timed out. Try again.')
+    const name = err?.name || ''
+    if (name === 'AbortError' || name === 'TimeoutError') {
+      throw new Error('AI request timed out. Please try again.')
     }
-    throw new Error(`AI request failed: ${err.message}`)
+    throw new Error(`AI request failed: ${extractError(err)}`)
   }
 
-  if (!response.ok) {
-    let errMsg = `AI service error (${response.status})`
-    try {
-      const errBody = await response.json()
-      if (errBody.error) errMsg = errBody.error
-    } catch { /* ignore */ }
-    throw new Error(errMsg)
-  }
-
+  // ── Parse response ──
   let data
   try {
     data = await response.json()
   } catch {
-    throw new Error('Invalid response from AI service.')
+    throw new Error(`AI service returned invalid response (HTTP ${response.status}).`)
   }
 
-  const text = data.content?.[0]?.text
-  if (!text) throw new Error('Empty response from AI. Try again.')
+  // ── Handle Anthropic-level errors (e.g. invalid API key, quota exceeded) ──
+  if (!response.ok) {
+    // Anthropic error shape: { type: 'error', error: { type: '...', message: '...' } }
+    const msg = data?.error?.message || data?.error || `AI service error (HTTP ${response.status})`
+    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg))
+  }
+
+  // ── Extract text ──
+  const text = data?.content?.[0]?.text
+  if (!text) {
+    throw new Error('AI returned an empty response. Please try again.')
+  }
+
   return text
 }
